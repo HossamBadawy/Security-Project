@@ -18,7 +18,6 @@ class GUI(threading.Thread):
         self.login_window = LoginWindow(self, self.font)
         self.login_window.run()
         self.main_window = ChatWindow(self, self.font)
-        print('yarab3')
         self.main_window.run()
         # self.main_window = ChatWindow(self, self.font)
         # self.notify_server(self.login_window.login, 'login')
@@ -156,6 +155,7 @@ class ChatWindow(Window):
         self.lock = threading.RLock()
         self.target = ''
         self.login = self.gui.login_window.login
+        self.build_window()
 
         
 
@@ -229,7 +229,7 @@ class ChatWindow(Window):
 
     def run(self):
         """Handle chat window actions"""
-        self.build_window()
+        # self.build_window()
         self.root.mainloop()
         self.root.destroy()
 
@@ -244,7 +244,7 @@ class ChatWindow(Window):
         text = self.entry.get(1.0, tk.END)
         if text != '\n':
             message = 'msg;' + self.login + ';' + self.target + ';' + text[:-1]
-            print(message)
+            
             self.gui.send_message(message.encode(ENCODING))
             self.entry.mark_set(tk.INSERT, 1.0)
             self.entry.delete(1.0, tk.END)

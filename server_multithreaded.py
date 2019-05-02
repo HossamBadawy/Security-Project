@@ -5,12 +5,21 @@ import time
 import hashlib, binascii, os
 import psycopg2
 import stegano
+from cryptography.fernet import Fernet
 import cv2
+import rsa
+import pem
+import des
+
+from des import DesKey
 from LSBSteg import LSBSteg
 
 ENCODING = 'utf-8'
 HOST = 'localhost'
 PORT = 8889
+KEY = b'f_EmiOGSbKJSXri9HnKzinSf0Oh4Q0QNUFxdQjlrcbs='
+KEYENC = Fernet(KEY)
+
 
 
 class Server(threading.Thread):
@@ -65,7 +74,7 @@ class Server(threading.Thread):
                 if connection not in self.connection_list:
                     self.connection_list.append(connection)
             except socket.error:
-                pass
+                pass      
             finally:
                 self.lock.release()
             time.sleep(0.050)
@@ -78,13 +87,19 @@ class Server(threading.Thread):
                 for connection in self.connection_list:
                     try:
                         self.lock.acquire()
+                       
                         data = "".encode(ENCODING)
                         dataString = data.decode(ENCODING)
-                        while(not "EOF" in dataString):
-                          data += connection.recv(3965758)
-                          dataString = data.decode(ENCODING)                          
-                        
-                        # print(data)
+                        data = connection.recv(99999999)
+                        # while(not "EOF" in dataString):
+                        #   data += connection.recv(3965758)
+                        #   if(data):
+                        #      dataenc = KEYENC.decrypt(data)
+                        #      dataString = dataenc.decode(ENCODING)
+                        if data:
+                            data = KEYENC.decrypt(data)
+
+                       
                     except socket.error:
                         data = None
                     finally:
@@ -101,16 +116,17 @@ class Server(threading.Thread):
                 dataString = (str(data.decode(ENCODING))).split(';')
                 dataString.append('EOF')
                 data = (';'.join(dataString)).encode(ENCODING)
-                
+                data = KEYENC.encrypt(data)
+                action = dataString[0]
                 if target == 'all':
-                    self.send_to_all(origin, data)
+                    self.send_to_all(origin, data, action, dataString[1])
                 else:
-                    self.send_to_one(target, data)
+                    self.send_to_one(target, data, action, dataString[1])
                 self.queue.task_done()
             else:
                 time.sleep(0.05)
 
-    def send_to_all(self, origin, data):
+    def send_to_all(self, origin, data, action,user):
         """Send data to all users except origin"""
         if origin != 'server':
             origin_address = self.login_list[origin]
@@ -121,14 +137,16 @@ class Server(threading.Thread):
             if connection != origin_address:
                 try:
                     self.lock.acquire()
-                    print(data)
                     connection.send(data)
                 except socket.error:
                     self.remove_connection(connection)
                 finally:
+                    if action == "registerF" or action == "loginFail":
+                        
+                        del self.login_list[user]
                     self.lock.release()
 
-    def send_to_one(self, target, data):
+    def send_to_one(self, target, data, action, user):
         """Send data to specified target"""
         target_address = self.login_list[target]
         try:
@@ -137,6 +155,10 @@ class Server(threading.Thread):
         except socket.error:
             self.remove_connection(target_address)
         finally:
+            if action == "registerF" or action == "loginFail":
+                
+                del self.login_list[user]
+
             self.lock.release()
     
     def registerDB(self, user, hashed, salt):
@@ -151,11 +173,13 @@ class Server(threading.Thread):
             cursor = connection.cursor()
             # cursor.execute("Insert into public.users values('"+user+"','"+hashed+"','"+salt+"');")
             cursor.execute('INSERT INTO public.users (username, hash, salt) VALUES (%s, %s, %s)', (user, hashed, salt))
+            
         except (Exception, psycopg2.Error) as error :
             print ("Error while connecting to PostgreSQL", error)
             flag = False
         finally:
             #closing database connection.
+                self.assign_keys_users(user)
                 if(connection):
                     connection.commit()
                     cursor.close()
@@ -180,11 +204,11 @@ class Server(threading.Thread):
                     logins = 'registerC'
                     for login in self.login_list:
                         logins += ';' + login
-                    logins += ';' + message[1]
-                    logins += ';all' + '\n'
+                    logins += ';' + message[1]+'\n'
                     self.queue.put((message[1], 'server', logins.encode(ENCODING)))
+                    
                     # print(message[1] + ' has logged in')
-                    # self.update_login_list()
+                    self.update_login_list()
                 else:
                     print(message[1] + 'failed registered')
                     self.login_list[message[1]] = connection
@@ -203,6 +227,11 @@ class Server(threading.Thread):
                 if flag:
                     self.login_list[message[1]] = connection
                     print(message[1] + ' has logged in')
+                    logins = 'loginC'
+                    for login in self.login_list:
+                        logins += ';' + login
+                    logins += ';' + message[1]+'\n'
+                    self.queue.put((message[1], 'server', logins.encode(ENCODING)))
                     self.update_login_list()
                 else:
                     print("Invalid Username or password")
@@ -214,10 +243,12 @@ class Server(threading.Thread):
                     self.queue.put((message[1], 'server', logins.encode(ENCODING)))
 
             elif message[0] == 'logout':
-                self.connection_list.remove(self.login_list[message[1]])
-                if message[1] in self.login_list:
-                    del self.login_list[message[1]]
-                print(message[1] + ' has logged out')
+                
+                if( not message[1]=='all'):
+                    self.connection_list.remove(self.login_list[message[1]])
+                    if message[1] in self.login_list:
+                        del self.login_list[message[1]]
+                    print(message[1] + ' has logged out')
                 self.update_login_list()
            
             elif (message[0] == 'msg') and message[2] != 'all':
@@ -230,6 +261,51 @@ class Server(threading.Thread):
                 msg = data.decode(ENCODING) + '\n'
                 data = msg.encode(ENCODING)
                 self.queue.put(('all', message[1], data))
+
+    def assign_keys_users(self, username):
+        user_public, user_private = rsa.newkeys(512)
+        x =  user_public._save_pkcs1_pem()
+        
+        with open('publickeys.pem','wb') as file1:
+            file1.write((x))
+            file1.close()
+        y =  user_private._save_pkcs1_pem()
+        with open('privatekeys.pem','wb') as file2:
+            file2.write((y))
+            file2.close
+        
+        connection = None
+        flag = True
+        try:
+            connection = psycopg2.connect(user = "postgres",
+                                        password = "123456",
+                                        host = "127.0.0.1",
+                                        port = "5432",
+                                        database = "security")
+            with open('publickeys.pem','rb')as file1:
+                certsPublic = pem.parse(file1.read())
+                certsPublic = certsPublic[0].as_bytes()
+                
+
+            with open('privatekeys.pem','rb')as file2:
+                certsPrivate = pem.parse(file2.read())
+                certsPrivate = certsPrivate[0].as_bytes()
+                
+            
+            cursor = connection.cursor()
+            cursor.execute('INSERT INTO public.keys (username, publickey, privatekey) VALUES (%s, %s, %s)', (username, certsPublic, certsPrivate))
+        except (Exception, psycopg2.Error) as error :
+            print ("Error while connecting to PostgreSQL", error)
+            flag = False
+        finally:
+            #closing database connection.
+                if(connection):
+                    connection.commit()
+                    cursor.close()
+                    connection.close()
+                    print("PostgreSQL connection is closed")        
+                return flag
+
 
     def remove_connection(self, connection):
         """Remove connection from server's connection list"""
@@ -268,7 +344,7 @@ class Server(threading.Thread):
                                     salt.encode('ascii'), 
                                     100000)
         pwdhash = binascii.hexlify(pwdhash).decode('ascii')
-        print(pwdhash)
+        
         return pwdhash == stored_password
 
     def loginDB(self, user, hashed):
@@ -284,7 +360,7 @@ class Server(threading.Thread):
             cursor.execute('SELECT * from public.users where username = %s', (user,))
             
             record = cursor.fetchall()
-            print(record)
+            
             if len(record) == 0:
                 flag = False
             else:

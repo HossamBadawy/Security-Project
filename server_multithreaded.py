@@ -6,6 +6,7 @@ import hashlib, binascii, os
 import psycopg2
 import stegano
 import cv2
+import rsa
 from LSBSteg import LSBSteg
 
 ENCODING = 'utf-8'
@@ -151,11 +152,13 @@ class Server(threading.Thread):
             cursor = connection.cursor()
             # cursor.execute("Insert into public.users values('"+user+"','"+hashed+"','"+salt+"');")
             cursor.execute('INSERT INTO public.users (username, hash, salt) VALUES (%s, %s, %s)', (user, hashed, salt))
+            
         except (Exception, psycopg2.Error) as error :
             print ("Error while connecting to PostgreSQL", error)
             flag = False
         finally:
             #closing database connection.
+                self.assign_keys_users(user)
                 if(connection):
                     connection.commit()
                     cursor.close()
@@ -230,6 +233,33 @@ class Server(threading.Thread):
                 msg = data.decode(ENCODING) + '\n'
                 data = msg.encode(ENCODING)
                 self.queue.put(('all', message[1], data))
+
+    def assign_keys_users(self, username):
+        user_public, user_private = rsa.newkeys(512)
+        
+        
+        connection = None
+        flag = True
+        try:
+            connection = psycopg2.connect(user = "postgres",
+                                        password = "123456",
+                                        host = "127.0.0.1",
+                                        port = "5432",
+                                        database = "security")
+            cursor = connection.cursor()
+            cursor.execute('INSERT INTO public."Keys" (username, publickey, privatekey) VALUES (%s, %s, %s)', (username, str(user_public), str(user_private)))
+        except (Exception, psycopg2.Error) as error :
+            print ("Error while connecting to PostgreSQL", error)
+            flag = False
+        finally:
+            #closing database connection.
+                if(connection):
+                    connection.commit()
+                    cursor.close()
+                    connection.close()
+                    print("PostgreSQL connection is closed")        
+                return flag
+
 
     def remove_connection(self, connection):
         """Remove connection from server's connection list"""
